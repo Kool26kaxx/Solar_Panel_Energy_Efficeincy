@@ -1,0 +1,128 @@
+import paho.mqtt.client as mqtt
+import mysql.connector
+import requests
+import json
+from datetime import datetime
+
+# MQTT Broker details
+mqtt_broker = "15.206.189.121"
+mqtt_port = 1883
+mqtt_topic = "sensor/data"
+
+# MySQL database connection details
+db_config = {
+    'host': 'localhost',
+    'user': 'solar1',
+    'password': 'your_password',  # Replace with your MySQL password
+    'database': 'device_data'
+}
+
+# ThingsBoard Access Token and API URL
+thingsboard_access_token = "2V8PQEhGwwyLWjfdy2D5"
+thingsboard_url = f"https://eu.thingsboard.cloud/api/v1/{thingsboard_access_token}/telemetry"
+
+# Callback when connection is established with the broker
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Connected to MQTT broker!")
+        client.subscribe(mqtt_topic)
+    else:
+        print(f"Failed to connect, return code {rc}")
+
+# Callback when a message is received from the broker
+def on_message(client, userdata, msg):
+    try:
+        message = msg.payload.decode()
+        print(f"Raw message received: {message}")
+
+        # Parse the incoming message
+        data = parse_sensor_data(message)
+        if data:
+            print(f"Parsed data: {data}")
+
+            # Insert data into MySQL database
+            insert_into_database(data)
+
+            # Send data to ThingsBoard
+            send_data_to_thingsboard(data)
+    except Exception as e:
+        print(f"Error processing message: {e}")
+
+# Parse the sensor data from the JSON message
+def parse_sensor_data(message):
+    print("Parsing message...")
+    try:
+        # Parse the JSON message
+        data = json.loads(message)
+
+        # Ensure the timestamp is in a valid datetime format
+        if "timestamp" not in data or not data["timestamp"]:
+            data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        return data
+    except json.JSONDecodeError as e:
+        print(f"Error parsing JSON: {e}")
+        return None
+
+# Insert parsed data into the MySQL database
+def insert_into_database(data):
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor()
+
+        query = """
+        INSERT INTO sensor_readings (
+            device_id, gps_lat, gps_lon, timestamp, temperature,
+            humidity, pressure, voltage, current, power, battery_percentage
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        values = (
+            data['device_id'], data['gps_lat'], data['gps_lon'], data['timestamp'],
+            data['temperature'], data['humidity'], data['pressure'],
+            data['voltage'], data['current'], data['power'], data['battery_percentage']
+        )
+        cursor.execute(query, values)
+        conn.commit()
+        print("Data inserted successfully into MySQL!")
+
+    except mysql.connector.Error as err:
+        print(f"Error inserting data into database: {err}")
+    finally:
+        if conn.is_connected():
+            cursor.close()
+            conn.close()
+
+# Send data to ThingsBoard
+def send_data_to_thingsboard(data):
+    try:
+        # Prepare telemetry payload
+        telemetry = {
+            "temperature": data["temperature"],
+            "humidity": data["humidity"],
+            "voltage": data["voltage"],
+            "current": data["current"],
+            "power": data["power"],
+            "battery_percentage": data["battery_percentage"],
+            "gps": {  # Nested GPS field
+                "latitude": data["gps_lat"],
+                "longitude": data["gps_lon"]
+            }
+        }
+
+        # Send telemetry data to ThingsBoard
+        response = requests.post(thingsboard_url, json=telemetry, headers={"Content-Type": "application/json"})
+        if response.status_code == 200:
+            print("Data sent successfully to ThingsBoard!")
+        else:
+            print(f"Failed to send data to ThingsBoard: {response.text}")
+    except requests.RequestException as e:
+        print(f"Error sending data to ThingsBoard: {e}")
+
+# Create a new MQTT client and configure callbacks
+client = mqtt.Client()
+client.on_connect = on_connect
+client.on_message = on_message
+
+# Connect to the MQTT broker and start listening
+client.connect(mqtt_broker, mqtt_port)
+client.loop_forever()
